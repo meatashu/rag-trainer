@@ -99,31 +99,34 @@ with tab1:
 
     query = st.text_input("Enter your question or search phrase:", key="qa_query")
 
+    response_placeholder = st.empty()
+
     if query:
-        with st.spinner("Searching for relevant documents..."):
-            # Get retriever and format docs
-            rag_used = False
-            retriever = db.as_retriever()
-            similar_docs = retriever.invoke(query)
+        with response_placeholder.container():
+            with st.spinner("Searching for relevant documents..."):
+                # Get retriever and format docs
+                rag_used = False
+                retriever = db.as_retriever()
+                similar_docs = retriever.invoke(query)
 
-            st.subheader("Most Relevant Chunks:")
-            if similar_docs:
-                for i, doc in enumerate(similar_docs):
-                    with st.expander(f"Chunk {i+1} (Similarity Score: {doc.metadata.get('score', 'N/A')})"):
-                        st.write(doc.page_content)
-                rag_used = True
-            else:
-                st.warning("No relevant documents found.")
+                st.subheader("Most Relevant Chunks:")
+                if similar_docs:
+                    for i, doc in enumerate(similar_docs):
+                        with st.expander(f"Chunk {i+1} (Similarity Score: {doc.metadata.get('score', 'N/A')})"):
+                            st.write(doc.page_content)
+                    rag_used = True
+                else:
+                    st.warning("No relevant documents found.")
 
-        st.subheader("Answer from RAG Pipeline:")
-        with st.spinner("Generating answer..."):
-            if rag_used:
-                st.info("💡 Answer augmented by the knowledge base (RAG).", icon="🧠")
-            else:
-                st.info("💡 Answering directly with the LLM (no relevant knowledge found).", icon="🤖")
-            rag_chain = rag.create_rag_chain(llm, retriever)
-            answer = rag_chain.invoke(query)
-            st.write(answer)
+            st.subheader("Answer from RAG Pipeline:")
+            with st.spinner("Generating answer..."):
+                if rag_used:
+                    st.info("💡 Answer augmented by the knowledge base (RAG).", icon="🧠")
+                else:
+                    st.info("💡 Answering directly with the LLM (no relevant knowledge found).", icon="🤖")
+                rag_chain = rag.create_rag_chain(llm, retriever)
+                answer = rag_chain.invoke(query)
+                st.write(answer)
 
 # --- TAB 2: View Existing Knowledge ---
 with tab2:
@@ -149,7 +152,7 @@ with tab2:
                     all_keywords = []
 
                     # Simple stop words list
-                    stop_words = set(["the", "a", "an", "in", "on", "is", "it", "and", "to", "of", "for", "was", "were"])
+                    stop_words = set(["the", "a", "an", "in", "on", "is", "it", "and", "to", "of", "for", "was", "were", "with", "that", "this", "as", "by", "at", "from", "be", "or", "not", "are", "but", "have", "has", "had", "they", "you", "he", "she", "we", "his", "her", "its", "my", "your", "our", "their"])
 
                     for doc_id, doc in all_docs.items():
                         # Find words, lowercase them, and filter out stop words and short words
