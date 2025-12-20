@@ -8,6 +8,7 @@ from streamlit_agraph import agraph, Node, Edge, Config
 from collections import Counter
 import ollama
 import re
+import json
 
 # --- App Configuration ---
 st.set_page_config(
@@ -78,7 +79,7 @@ else:
     def get_hf_llm():
         return rag.load_hf_llm()
     llm = get_hf_llm()
-    st.sidebar.info("Using default Hugging Face model (google/flan-t5-base).")
+    st.sidebar.info("Using an LLM integration is optional. Without it, only similarity search is available.")
 
 
 # Load the vector store. This is not cached as it can be updated.
@@ -103,39 +104,46 @@ with tab1:
 
     if query:
         with response_placeholder.container():
-            with st.spinner("Searching for relevant documents..."):
-                # Get retriever and format docs
-                rag_used = False
-                retriever = db.as_retriever()
-                similar_docs = retriever.invoke(query)
+            retriever = db.as_retriever()
+            rag_chain = rag.create_rag_chain(llm, retriever)
 
-                st.subheader("Most Relevant Chunks:")
-                if similar_docs:
-                    for i, doc in enumerate(similar_docs):
-                        with st.expander(f"Chunk {i+1} (Similarity Score: {doc.metadata.get('score', 'N/A')})"):
-                            st.write(doc.page_content)
-                    rag_used = True
-                else:
-                    st.warning("No relevant documents found.")
+            with st.spinner("Generating answer and finding relevant documents..."):
+                result = rag_chain.invoke(query)
+                answer = result["answer"]
+                similar_docs = result["context"]
 
             st.subheader("Answer from RAG Pipeline:")
-            with st.spinner("Generating answer..."):
-                if rag_used:
-                    st.info("💡 Answer augmented by the knowledge base (RAG).", icon="🧠")
-                else:
-                    st.info("💡 Answering directly with the LLM (no relevant knowledge found).", icon="🤖")
-                rag_chain = rag.create_rag_chain(llm, retriever)
-                answer = rag_chain.invoke(query)
+            if similar_docs:
+                st.info("💡 Answer augmented by the knowledge base (RAG).", icon="🧠")
+            else:
+                st.info("💡 Answering directly with the LLM (no relevant knowledge found).", icon="🤖")
+
+            answer_tab, trace_tab = st.tabs(["Formatted Answer", "Trace Information"])
+
+            with answer_tab:
                 st.write(answer)
+
+            with trace_tab:
+                st.subheader("Chunks Used for Answering:")
+                if similar_docs:
+                    for i, doc in enumerate(similar_docs):
+                        with st.expander(f"Chunk {i+1} (Source: {doc.metadata.get('source', 'N/A')})"):
+                            st.write(doc.page_content)
+                else:
+                    st.warning("No relevant documents were used for answering.")
 
 # --- TAB 2: View Existing Knowledge ---
 with tab2:
     st.header("Browse Existing Knowledge")
     st.write("These are the documents currently indexed in the FAISS vector store.")
 
+    GRAPH_FILE = "knowledge_graph.json"
+
     if st.button("Refresh Knowledge View"):
         # Re-load the vector store to get the latest data
         db = rag.load_or_create_vector_store(embeddings)
+        if os.path.exists(GRAPH_FILE):
+            os.remove(GRAPH_FILE)
         st.rerun()
 
     if db and db.docstore:
@@ -146,49 +154,65 @@ with tab2:
             # --- Knowledge Graph Visualization ---
             st.subheader("Interactive Knowledge Graph")
             if st.toggle("Generate Knowledge Graph", value=False):
-                with st.spinner("Building graph..."):
-                    nodes = []
-                    edges = []
-                    all_keywords = []
+                nodes = []
+                edges = []
 
-                    # Simple stop words list
-                    stop_words = set(["the", "a", "an", "in", "on", "is", "it", "and", "to", "of", "for", "was", "were", "with", "that", "this", "as", "by", "at", "from", "be", "or", "not", "are", "but", "have", "has", "had", "they", "you", "he", "she", "we", "his", "her", "its", "my", "your", "our", "their"])
+                if os.path.exists(GRAPH_FILE):
+                    with st.spinner("Loading graph from file..."):
+                        with open(GRAPH_FILE, 'r') as f:
+                            graph_data = json.load(f)
+                        nodes = [Node(id=node_data['id'], label=node_data['label'], size=node_data['size'], shape=node_data['shape']) for node_data in graph_data['nodes']]
+                        edges = [Edge(source=edge_data['source'], target=edge_data['to']) for edge_data in graph_data['edges']]
+                else:
+                    with st.spinner("Building graph..."):
+                        all_keywords = []
 
-                    for doc_id, doc in all_docs.items():
-                        # Find words, lowercase them, and filter out stop words and short words
-                        words = re.findall(r'\b\w+\b', doc.page_content.lower())
-                        keywords = [word for word in words if word not in stop_words and len(word) > 3]
-                        all_keywords.extend(keywords)
+                        # Simple stop words list
+                        stop_words = set(["the", "a", "an", "in", "on", "is", "it", "and", "to", "of", "for", "was", "were", "with", "that", "this", "as", "by", "at", "from", "be", "or", "not", "are", "but", "have", "has", "had", "they", "you", "he", "she", "we", "his", "her", "its", "my", "your", "our", "their"])
+
+                        for doc_id, doc in all_docs.items():
+                            # Find words, lowercase them, and filter out stop words and short words
+                            words = re.findall(r'\b\w+\b', doc.page_content.lower())
+                            keywords = [word for word in words if word not in stop_words and len(word) > 3]
+                            all_keywords.extend(keywords)
+                            
+                            # Create edges for co-occurring keywords in the same doc
+                            for i in range(len(keywords)):
+                                for j in range(i + 1, len(keywords)):
+                                    if keywords[i] != keywords[j]: # Avoid self-loops
+                                        edges.append(Edge(source=keywords[i], target=keywords[j]))
+
+                        # Count keyword frequency to size nodes
+                        keyword_counts = Counter(all_keywords)
                         
-                        # Create edges for co-occurring keywords in the same doc
-                        for i in range(len(keywords)):
-                            for j in range(i + 1, len(keywords)):
-                                if keywords[i] != keywords[j]: # Avoid self-loops
-                                    edges.append(Edge(source=keywords[i], target=keywords[j]))
+                        # Create unique nodes with size based on frequency
+                        for keyword, count in keyword_counts.items():
+                            nodes.append(Node(id=keyword, 
+                                              label=keyword, 
+                                              size=10 + count * 2, # Base size + increment per occurrence
+                                              shape="dot") 
+                                        )
+                        
+                        # Save graph to file
+                        graph_data_to_save = {
+                            "nodes": [{"id": n.id, "label": n.label, "size": n.size, "shape": n.shape} for n in nodes],
+                            "edges": [{"source": e.source, "to": e.to} for e in edges]
+                        }
+                        with open(GRAPH_FILE, 'w') as f:
+                            json.dump(graph_data_to_save, f)
 
-                    # Count keyword frequency to size nodes
-                    keyword_counts = Counter(all_keywords)
-                    
-                    # Create unique nodes with size based on frequency
-                    for keyword, count in keyword_counts.items():
-                        nodes.append(Node(id=keyword, 
-                                          label=keyword, 
-                                          size=10 + count * 2, # Base size + increment per occurrence
-                                          shape="dot") 
-                                    )
+                # Configure the graph layout and physics for better interaction
+                config = Config(width=1200,
+                                height=600,
+                                directed=True,
+                                # Let the physics engine run live for a more dynamic view
+                                physics={'barnesHut': {'gravitationalConstant': -2000, 'springConstant': 0.5, 'springLength': 250}, 'minVelocity': 0.75,},
+                                interaction={'dragNodes':True, 'dragView': True, 'zoomView': True, 'navigationButtons': True, 'tooltipDelay': 100, 'hover': True, 'hoverConnectedEdges': True, 'hideEdgesOnDrag': True, },
+                                # Hierarchical layout can be an alternative
+                                hierarchical=False,
+                                )
 
-                    # Configure the graph layout and physics for better interaction
-                    config = Config(width=750,
-                                    height=600,
-                                    directed=False,
-                                    # Let the physics engine run live for a more dynamic view
-                                    physics={'barnesHut': {'gravitationalConstant': -8000, 'springConstant': 0.04, 'springLength': 250}},
-                                    interaction={'dragNodes':True, 'dragView': True, 'zoomView': True},
-                                    # Hierarchical layout can be an alternative
-                                    hierarchical=False,
-                                    )
-
-                    agraph(nodes=nodes, edges=edges, config=config)
+                agraph(nodes=nodes, edges=edges, config=config)
 
             # --- Raw Knowledge Chunk Viewer ---
             st.subheader("Browse and Manage Knowledge Chunks")

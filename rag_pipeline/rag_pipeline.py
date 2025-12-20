@@ -1,7 +1,7 @@
 import os
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.runnables import RunnablePassthrough, RunnableParallel
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -78,7 +78,7 @@ def load_ollama_llm(model_name: str, base_url: str = "http://localhost:11434"):
     return llm
 
 def create_rag_chain(llm, retriever):
-    """Creates the RAG chain using LangChain Expression Language (LCEL)."""
+    """Creates a RAG chain that returns a dictionary with 'answer' and 'context'."""
     template = """
     Use the following pieces of context to answer the question at the end.
     If you don't know the answer, just say that you don't know, don't try to make up an answer.
@@ -90,13 +90,18 @@ def create_rag_chain(llm, retriever):
     def format_docs(docs):
         return "\n\n".join(doc.page_content for doc in docs)
 
-    rag_chain = (
+    rag_chain_for_answer = (
         {"context": retriever | format_docs, "question": RunnablePassthrough()}
         | rag_prompt_custom
         | llm
         | StrOutputParser()
     )
-    return rag_chain
+
+    chain = RunnableParallel(
+        {"answer": rag_chain_for_answer, "context": retriever}
+    )
+
+    return chain
 
 def main():
     """Main function to run the RAG pipeline as a script."""
@@ -115,8 +120,12 @@ def main():
         This function takes a user's question, queries the RAG pipeline, and prints the answer.
         """
         print(f"Query: {question}")
-        answer = rag_chain.invoke(question)
-        print(f"Answer: {answer}\n")
+        result = rag_chain.invoke(question)
+        print(f"Answer: {result['answer']}\n")
+        print("--- CONTEXT ---")
+        for doc in result['context']:
+            print(doc)
+            print("-" * 20)
 
     # 4. Run example queries
     print("--- Querying the RAG Pipeline ---")
